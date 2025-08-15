@@ -81,14 +81,14 @@ class ProgressTracker:
                 
                 self.logger.info(
                     f"Progress: {percentage:.1f}% "
-                    f"({self._format_size(self.processed)}/{self._format_size(self.total_size)}) "
-                    f"Speed: {self._format_size(rate)}/s "
+                    f"({self.__format_size(self.processed)}/{self.__format_size(self.total_size)}) "
+                    f"Speed: {self.__format_size(rate)}/s "
                     f"ETA: {eta.strftime('%H:%M:%S')}"
                 )
             else:
                 self.logger.info(f"Progress: {percentage:.1f}%")
     
-    def _format_size(self, size: float) -> str:
+    def __format_size(self, size: float) -> str:
         """Format size with appropriate unit"""
         if self.unit == "bytes":
             for unit in ['B', 'KB', 'MB', 'GB']:
