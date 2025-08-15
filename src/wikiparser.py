@@ -48,10 +48,20 @@ class WikiParser:
         self.max_article_length = max_article_length
         self.batch_size = batch_size
         
-        # Output files
-        self.corpus_file = self.output_dir / "corpus.txt"
-        self.vocab_file = self.output_dir / "vocab_stats.json"
-        self.checkpoint_file = self.output_dir / "checkpoint.json"
+        # Extract base filename from dump path (remove all extensions)
+        base_filename = self.dump_path.name
+        # Remove .xml.bz2 or .bz2 extensions
+        if base_filename.endswith('.xml.bz2'):
+            base_filename = base_filename[:-8]  # Remove .xml.bz2
+        elif base_filename.endswith('.bz2'):
+            base_filename = base_filename[:-4]  # Remove .bz2
+        elif base_filename.endswith('.xml'):
+            base_filename = base_filename[:-4]  # Remove .xml
+        
+        # Output files with dynamic naming
+        self.corpus_file = self.output_dir / f"{base_filename}-corpus.txt"
+        self.vocab_file = self.output_dir / f"{base_filename}-vocab_stats.json"
+        self.checkpoint_file = self.output_dir / f"{base_filename}-checkpoint.json"
         
         # Processing state
         self.articles_processed = 0
