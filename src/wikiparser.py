@@ -2,6 +2,7 @@
 Wikidump Parser for Word Embeddings
 Processes Wikipedia XML dumps and extracts clean text content
 Optimized for Skip-gram, SPPMI-SVD, and GloVe algorithms
+Utilises keyword filtering for targeted content extraction
 """
 
 import bz2
@@ -9,7 +10,7 @@ import json
 import logging
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Generator, Optional, Dict
+from typing import Generator, Optional
 from collections import Counter
 import wikitextparser as wtp
 from bs4 import BeautifulSoup
@@ -20,6 +21,7 @@ class WikiParser:
     """
     Memory-efficient Wikipedia parser optimized for word embedding training
     Outputs clean text corpus with vocabulary statistics
+    Uses keyword filtering for targeted content extraction
     """
     
     def __init__(self, 
@@ -28,7 +30,9 @@ class WikiParser:
                  logger: logging.Logger,
                  min_article_length: int = 100,
                  max_article_length: int = 50000,
-                 batch_size: int = 1000):
+                 batch_size: int = 1000,
+                 keywords: Optional[list[str]] = None,
+                 min_keyword_count: int = 5):
         """
         Initialize WikiParser
         
@@ -39,6 +43,8 @@ class WikiParser:
             min_article_length: Minimum article length in characters
             max_article_length: Maximum article length in characters  
             batch_size: Number of articles to process before flushing to disk
+            keywords: List of keywords to filter articles by
+            min_keyword_count: Minimum number of keyword instances required in content
         """
         self.dump_path = dump_path
         self.output_dir = Path(output_dir)
@@ -47,6 +53,21 @@ class WikiParser:
         self.min_article_length = min_article_length
         self.max_article_length = max_article_length
         self.batch_size = batch_size
+        self.min_keyword_count = min_keyword_count
+        
+        # Default keywords if none provided
+        self.keywords = keywords or [
+            "science", "physics", "chemistry", "biology", "mathematics", "research", "scientific",
+            "technology", "ai", "artificial intelligence", "machine learning", "blockchain", 
+            "cryptocurrency", "programming", "computer", "software", "digital",
+            "health", "medicine", "pandemic", "vaccine", "healthcare", "treatment", "medical",
+            "disease", "virus", "bacteria", "infection", "drug", "therapy",
+            "politics", "government", "election", "policy", "law", "political", "parliament", 
+            "congress", "senate", "legislation", "propaganda"
+        ]
+        
+        # Convert keywords to lowercase for case-insensitive matching
+        self.keywords_lower = [kw.lower() for kw in self.keywords]
         
         # Extract base filename from dump path (remove all extensions)
         base_filename = self.dump_path.name
@@ -66,6 +87,7 @@ class WikiParser:
         # Processing state
         self.articles_processed = 0
         self.articles_iterated = 0  # Total articles seen (including filtered out)
+        self.articles_keyword_filtered = 0  # Articles filtered out by keyword criteria
         self.total_words = 0
         self.vocab_counter = Counter()
         self.current_batch = []
@@ -73,8 +95,12 @@ class WikiParser:
         # Text cleaning regex patterns
         self.whitespace_pattern = re.compile(r'\s+')
         self.punct_pattern = re.compile(r'[^\w\s]')
+        
+        # Log filtering configuration
+        self.logger.info(f"Keyword filtering enabled with {len(self.keywords)} keywords")
+        self.logger.info(f"Filtering criteria: title contains keyword OR content has >{self.min_keyword_count} keyword instances")
     
-    def parse_dump(self) -> Generator[Dict, None, None]:
+    def parse_dump(self) -> Generator[dict, None, None]:
         """
         Parse Wikipedia dump and yield progress statistics
         """
@@ -118,6 +144,7 @@ class WikiParser:
                                     
                                     yield {
                                         "articles_processed": self.articles_processed,
+                                        "articles_keyword_filtered": self.articles_keyword_filtered,
                                         "total_words": self.total_words,
                                         "vocab_size": len(self.vocab_counter),
                                         "position": current_position
@@ -125,7 +152,11 @@ class WikiParser:
                             
                             # Log progress every 100 articles
                             if self.articles_iterated % 100 == 0:
-                                self.logger.info(f"Processed {self.articles_processed}/{self.articles_iterated} ({self.articles_processed/self.articles_iterated * 100:.1f}%) articles")
+                                self.logger.info(
+                                    f"Processed {self.articles_processed}/{self.articles_iterated} "
+                                    f"({self.articles_processed/self.articles_iterated * 100:.1f}%) articles, "
+                                    f"Keyword filtered: {self.articles_keyword_filtered}"
+                                )
                         
                         except Exception as e:
                             self.logger.error(f"Error processing page at position {current_position}: {e}")
@@ -143,6 +174,7 @@ class WikiParser:
                 
                 yield {
                     "articles_processed": self.articles_processed,
+                    "articles_keyword_filtered": self.articles_keyword_filtered,
                     "total_words": self.total_words,
                     "vocab_size": len(self.vocab_counter),
                     "position": current_position,
@@ -156,6 +188,7 @@ class WikiParser:
     def __process_page(self, elem) -> Optional[str]:
         """
         Extract and clean text from a Wikipedia page element
+        Now includes keyword filtering
         
         Returns:
             Clean text string or None if page should be skipped
@@ -185,7 +218,12 @@ class WikiParser:
         if text.strip().lower().startswith("#redirect"):
             return None
         
-        # Clean the text
+        # KEYWORD FILTERING: Check if article should be processed
+        if not self.__passes_keyword_filter(title, text):
+            self.articles_keyword_filtered += 1
+            return None
+        
+        # Clean the text (only if it passes keyword filter)
         clean_text = self.__clean_text(text)
         
         # Filter by length
@@ -194,6 +232,38 @@ class WikiParser:
             return None
         
         return clean_text
+    
+    def __passes_keyword_filter(self, title: str, raw_text: str) -> bool:
+        """
+        Check if article passes keyword filtering criteria
+        
+        Args:
+            title: Article title
+            raw_text: Raw article content
+            
+        Returns:
+            True if article should be processed, False otherwise
+        """
+        title_lower = title.lower()
+        
+        # Check condition 1: Title contains keyword
+        for keyword in self.keywords_lower:
+            if keyword in title_lower:
+                return True
+        
+        # Check condition 2: Content has more than min_keyword_count instances of keywords
+        content_lower = raw_text.lower()
+        keyword_count = 0
+        
+        for keyword in self.keywords_lower:
+            # Count occurrences of this keyword
+            keyword_count += content_lower.count(keyword)
+            
+            # Early exit if we've already found enough
+            if keyword_count > self.min_keyword_count:
+                return True
+        
+        return False
     
     def __clean_text(self, raw_text: str) -> str:
         """
@@ -270,6 +340,10 @@ class WikiParser:
             "total_words": self.total_words,
             "unique_words": len(self.vocab_counter),
             "articles_processed": self.articles_processed,
+            "articles_keyword_filtered": self.articles_keyword_filtered,
+            "filter_rate": f"{self.articles_keyword_filtered/max(1, self.articles_iterated)*100:.1f}%",
+            "keywords_used": self.keywords,
+            "min_keyword_count": self.min_keyword_count,
             "top_words": dict(self.vocab_counter.most_common(1000)),
             "word_frequencies": dict(self.vocab_counter)
         }
@@ -289,9 +363,12 @@ class WikiParser:
             "position": position,
             "articles_processed": self.articles_processed,
             "articles_iterated": self.articles_iterated,
+            "articles_keyword_filtered": self.articles_keyword_filtered,
             "total_words": self.total_words,
             "vocab_size": len(self.vocab_counter),
-            "dump_file": str(self.dump_path)
+            "dump_file": str(self.dump_path),
+            "keywords": self.keywords,
+            "min_keyword_count": self.min_keyword_count
         }
         
         try:
@@ -309,14 +386,17 @@ class WikiParser:
             with open(self.checkpoint_file, 'r') as f:
                 checkpoint_data = json.load(f)
             
-            # Verify same dump file
-            if checkpoint_data.get("dump_file") != str(self.dump_path):
-                self.logger.warning("Checkpoint is for different dump file")
+            # Verify same dump file and filtering settings
+            if (checkpoint_data.get("dump_file") != str(self.dump_path) or
+                checkpoint_data.get("keywords") != self.keywords or
+                checkpoint_data.get("min_keyword_count") != self.min_keyword_count):
+                self.logger.warning("Checkpoint is for different configuration, starting fresh")
                 return 0
             
             # Restore state
             self.articles_processed = checkpoint_data.get("articles_processed", 0)
             self.articles_iterated = checkpoint_data.get("articles_iterated", 0)
+            self.articles_keyword_filtered = checkpoint_data.get("articles_keyword_filtered", 0)
             self.total_words = checkpoint_data.get("total_words", 0)
             
             # Load existing vocabulary if resuming
@@ -331,21 +411,24 @@ class WikiParser:
             self.logger.warning(f"Failed to load checkpoint: {e}")
             return 0
     
-    def get_corpus_stats(self) -> Dict:
+    def get_corpus_stats(self) -> dict:
         """Get current corpus statistics"""
-        filtered_out = self.articles_iterated - self.articles_processed
+        total_filtered = self.articles_iterated - self.articles_processed
         return {
             "articles_iterated": self.articles_iterated,
             "articles_processed": self.articles_processed,
-            "articles_filtered_out": filtered_out,
-            "filter_rate": f"{filtered_out/max(1, self.articles_iterated)*100:.1f}%",
+            "articles_filtered_out_total": total_filtered,
+            "articles_keyword_filtered": self.articles_keyword_filtered,
+            "articles_other_filters": total_filtered - self.articles_keyword_filtered,
+            "keyword_filter_rate": f"{self.articles_keyword_filtered/max(1, self.articles_iterated)*100:.1f}%",
+            "total_filter_rate": f"{total_filtered/max(1, self.articles_iterated)*100:.1f}%",
             "total_words": self.total_words,
             "unique_words": len(self.vocab_counter),
             "corpus_file_size": self.corpus_file.stat().st_size if self.corpus_file.exists() else 0
         }
 
 
-# Example usage for word embeddings
+# Example usage for word embeddings with keyword filtering
 if __name__ == "__main__":
     import logging
     
@@ -365,21 +448,36 @@ if __name__ == "__main__":
     
     logger.propagate = False
     
-    # Parse dump
+    # Parse dump with keyword filtering
     dump_path = Path("data/WikiDump-2019.bz2")
     if dump_path.exists():
+        # Custom keywords (optional - defaults are provided)
+        custom_keywords = [
+            "science", "physics", "chemistry", "biology", "mathematics", "research", "scientific",
+            "technology", "ai", "artificial intelligence", "machine learning", "blockchain", 
+            "cryptocurrency", "programming", "computer", "software", "digital",
+            "health", "medicine", "pandemic", "vaccine", "healthcare", "treatment", "medical",
+            "disease", "virus", "bacteria", "infection", "drug", "therapy",
+            "politics", "government", "election", "policy", "law", "political", "parliament", 
+            "congress", "senate", "legislation", "propaganda"
+        ]
+        
         parser = WikiParser(
             dump_path=dump_path,
             output_dir="data/corpus",
             logger=logger,
             min_article_length=100,  # Skip very short articles
             max_article_length=50000,  # Skip extremely long articles
-            batch_size=1000  # Process 1000 articles at a time
+            batch_size=1000,  # Process 1000 articles at a time
+            keywords=custom_keywords,  # Use custom keywords
+            min_keyword_count=5  # Require more than 5 keyword instances in content
         )
         
         for stats in parser.parse_dump():
             if stats.get("completed"):
                 logger.info(f"Processing completed: {stats}")
+                final_stats = parser.get_corpus_stats()
+                logger.info(f"Final statistics: {final_stats}")
             else:
                 logger.info(f"Progress: {stats}")
     else:
